@@ -26,6 +26,16 @@ class WebBridge(
 ) {
     private val prefs = activity.getSharedPreferences("measure_app", Context.MODE_PRIVATE)
 
+    companion object {
+        // כתובת ברירת מחדל קבועה לעדכון תוכן - כדי שהאפליקציה תתעדכן לבד ברגע שיש
+        // אינטרנט, בלי שהמשתמש יצטרך להדביק שום כתובת בעצמו (בדיוק כמו ההתנהגות
+        // הישנה). מצביעה תמיד על ה-release האחרון שפורסם ב-GitHub Actions (ראו
+        // .github/workflows/build.yml, "web-update.zip"). אם המשתמש שומר כתובת שונה
+        // במסך "עדכון האפליקציה", היא תגבר על זו (ראו getUpdateUrl למטה).
+        private const val DEFAULT_UPDATE_URL =
+            "https://github.com/yochai1357908642/measure-app/releases/latest/download/web-update.zip"
+    }
+
     private fun runJs(js: String) {
         activity.runOnUiThread { webView.evaluateJavascript(js, null) }
     }
@@ -88,7 +98,7 @@ class WebBridge(
     }
 
     @JavascriptInterface
-    fun getUpdateUrl(): String = prefs.getString("update_url", "") ?: ""
+    fun getUpdateUrl(): String = prefs.getString("update_url", DEFAULT_UPDATE_URL) ?: DEFAULT_UPDATE_URL
 
     @JavascriptInterface
     fun setUpdateUrl(url: String) {
