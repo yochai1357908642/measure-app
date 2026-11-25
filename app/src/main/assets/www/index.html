@@ -3171,8 +3171,8 @@ function sketchView(it,nr){
       st.snapOff=!st.snapOff;b.setAttribute('aria-pressed',String(!st.snapOff));say(st.snapOff?'ההצמדה לפינות כבויה':'ההצמדה לפינות פעילה');}});
     b.innerHTML=NRX.magnet;return b;
   }
-  /* כפתורי הזום הוסרו ב-25.11.2026: הם הסתירו מידות על התוכנית. הזום במבט על נעשה עכשיו בצביטה (שתי אצבעות) או בגלגלת+Ctrl. */
-  function makeZoomCtl(){return h('div',{class:'zctl'},(st.tool==='meas'||st.tool==='dim')?snapBtn():null);}
+
+  function makeZoomCtl(){return h('div',{class:'zctl'},(st.tool==='meas'||st.tool==='dim')?snapBtn():null,zbtn('+','הגדלה',function(){zoomPlan(1.4);}),zbtn('−','הקטנה',function(){zoomPlan(1/1.4);}),zbtn('⌂','איפוס זום',function(){resetPlan();}));}
   function makeEzCtl(){return h('div',{class:'zctl'},(st.etool==='meas'||st.etool==='dim')?snapBtn():null,zbtn('+','הגדלה',function(){zoomElev(1.4);}),zbtn('−','הקטנה',function(){zoomElev(1/1.4);}),zbtn('⌂','איפוס זום',function(){st.ez=null;drawElev();}));}
   function evb(){var z=st.ez||(st.ez={s:1,cx:0.5,cy:0.5}),w=evw/z.s,h2=evh/z.s;return {x:z.cx*evw-w/2,y:z.cy*evh-h2/2,w:w,h:h2};}
   function applyEz(){var b=evb();esvg.setAttribute('viewBox',r1(b.x)+' '+r1(b.y)+' '+r1(b.w)+' '+r1(b.h));}
