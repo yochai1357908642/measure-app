@@ -163,8 +163,17 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
 
         @SuppressLint("MissingPermission")
         private fun sendStartCommand(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+            // המטר לא בהכרח תומך בכתיבה "בלי תשובה" (Write Without Response) - חייבים
+            // לבדוק את היכולות האמיתיות של ה-characteristic ולהתאים את סוג הכתיבה,
+            // בדיוק כמו שהדפדפן עושה (writeValueWithoutResponse עם נפילה ל-writeValue).
+            // כתיבה עם סוג לא נתמך נכשלת בשקט (בלי שגיאה), וזה גרם לתופעה: "מתחבר" אבל
+            // לא זורם מידע בלחיצה על כפתור המדידה במטר עצמו.
+            ch.writeType =
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                else
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             ch.value = START_CMD
-            ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             val ok = g.writeCharacteristic(ch)
             connected = true
             runJs("window.__mpMeter && window.__mpMeter('on')")
