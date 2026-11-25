@@ -102,14 +102,14 @@ var downloads={
   save:function(o){
     if(window.Android&&window.Android.saveFile){
       return new Promise(function(res,rej){
-        var d=o.data,isCsv=/\.csv$/i.test(o.filename||''),blob=(typeof Blob!=='undefined'&&d instanceof Blob)?d:new Blob([isCsv?'\ufeff'+d:d],{type:mimeFor(o.filename)}),r=new FileReader();
+        var d=o.data,isCsv=/\.csv$/i.test(o.filename||''),blob=(typeof Blob!=='undefined'&&d instanceof Blob)?d:new Blob([isCsv?'﻿'+d:d],{type:mimeFor(o.filename)}),r=new FileReader();
         r.onload=function(){var s=String(r.result),i=s.indexOf(',');window.Android.saveFile(o.filename||'file',blob.type||mimeFor(o.filename),s.slice(i+1));res({});};
         r.onerror=function(){rej(r.error);};
         r.readAsDataURL(blob);
       });
     }
     return new Promise(function(res){
-      var d=o.data,isCsv=/\.csv$/i.test(o.filename||''),blob=(typeof Blob!=='undefined'&&d instanceof Blob)?d:new Blob([isCsv?'\ufeff'+d:d],{type:mimeFor(o.filename)});
+      var d=o.data,isCsv=/\.csv$/i.test(o.filename||''),blob=(typeof Blob!=='undefined'&&d instanceof Blob)?d:new Blob([isCsv?'﻿'+d:d],{type:mimeFor(o.filename)});
       var a=document.createElement('a');
       a.href=URL.createObjectURL(blob);a.download=o.filename||'file';a.style.display='none';
       document.body.appendChild(a);a.click();
@@ -170,9 +170,20 @@ function restore(file,msg){
 }
 var updMsg=null;
 window.__mpAndroid=function(m){
-  var t=m==='uptodate'?'האפליקציה מעודכנת.':m==='nourl'?'לא הוגדרה כתובת עדכון.':m.indexOf('updated:')===0?'עודכן לגרסה '+m.slice(8)+'. לחץ "הפעלת הגרסה החדשה".':m.indexOf('error:')===0?'העדכון נכשל: '+m.slice(6):'';
+  var t=m==='uptodate'?'האפליקציה מעודכנת.':m==='nourl'?'לא הוגדרה כתובת עדכון.':m.indexOf('updated:')===0?'עודכן לגרסה '+m.slice(8)+'. טוען את הגרסה החדשה…':m.indexOf('error:')===0?'העדכון נכשל: '+m.slice(6):'';
   if(updMsg&&t)updMsg.textContent=t;
+  if(m.indexOf('updated:')===0){
+    try{setTimeout(function(){window.Android.reload();},400);}catch(_){}
+  }
 };
+(function(){
+  try{
+    if(window.Android&&window.Android.getUpdateUrl&&window.Android.checkUpdate){
+      var u=window.Android.getUpdateUrl();
+      if(u&&u.trim())setTimeout(function(){try{window.Android.checkUpdate();}catch(_){}},1500);
+    }
+  }catch(_){}
+})();
 function updateCard(){
   updMsg=el('p',{'class':'sec-hint'});
   var inp=el('input',{type:'text','class':'sk-in',dir:'ltr',placeholder:'https://script.google.com/macros/s/…/exec','aria-label':'כתובת העדכון',value:window.Android.getUpdateUrl()});
