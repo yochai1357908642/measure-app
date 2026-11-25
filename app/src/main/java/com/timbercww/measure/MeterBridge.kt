@@ -136,6 +136,11 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                reportError("גילוי השירותים במטר נכשל (קוד $status).")
+                g.disconnect()
+                return
+            }
             val service = g.getService(SERVICE_UUID)
             val ch = service?.getCharacteristic(CHAR_UUID)
             if (ch == null) {
@@ -143,11 +148,17 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
                 g.disconnect()
                 return
             }
-            g.setCharacteristicNotification(ch, true)
+            val okLocal = g.setCharacteristicNotification(ch, true)
+            if (!okLocal) {
+                reportError("לא ניתן להפעיל קבלת מידע מהמטר (setCharacteristicNotification נכשל).")
+            }
             val cccd = ch.getDescriptor(CCCD_UUID)
             if (cccd != null) {
                 cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                g.writeDescriptor(cccd)
+                val queued = g.writeDescriptor(cccd)
+                if (!queued) {
+                    reportError("כתיבת הגדרת ההתראות למטר לא יצאה לדרך.")
+                }
             } else {
                 // אין CCCD - מנסים לשלוח את פקודת ההתחלה ישירות
                 sendStartCommand(g, ch)
@@ -156,6 +167,16 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
 
         @SuppressLint("MissingPermission")
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (descriptor.uuid != CCCD_UUID) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                // זה בדיוק המקרה ש"מתחבר אבל לא מגיע מידע": אם כתיבת ה-CCCD נכשלת (סטטוס
+                // שונה מ-GATT_SUCCESS - למשל חוסר הרשאה/אימות, או שהמטר פשוט לא תומך
+                // בהתראות על ה-characteristic הזה), המטר אף פעם לא נכנס למצב שידור, וההתראה
+                // 'on' לא הייתה נשלחת בעבר למרות שדבר לא עבד בפועל.
+                reportError("הפעלת ההתראות מהמטר נכשלה (קוד $status). ייתכן שצריך לשייך (pair) את המטר קודם בהגדרות הבלוטות' של הטלפון.")
+                try { g.disconnect() } catch (_: Exception) {}
+                return
+            }
             val service = g.getService(SERVICE_UUID)
             val ch = service?.getCharacteristic(CHAR_UUID) ?: return
             sendStartCommand(g, ch)
@@ -166,23 +187,39 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
             // המטר לא בהכרח תומך בכתיבה "בלי תשובה" (Write Without Response) - חייבים
             // לבדוק את היכולות האמיתיות של ה-characteristic ולהתאים את סוג הכתיבה,
             // בדיוק כמו שהדפדפן עושה (writeValueWithoutResponse עם נפילה ל-writeValue).
-            // כתיבה עם סוג לא נתמך נכשלת בשקט (בלי שגיאה), וזה גרם לתופעה: "מתחבר" אבל
-            // לא זורם מידע בלחיצה על כפתור המדידה במטר עצמו.
             ch.writeType =
                 if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 else
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             ch.value = START_CMD
-            val ok = g.writeCharacteristic(ch)
-            connected = true
-            runJs("window.__mpMeter && window.__mpMeter('on')")
-            if (!ok) {
-                Log.w(MainActivity.TAG, "meter start command write failed")
+            val queued = g.writeCharacteristic(ch)
+            if (!queued) {
+                reportError("שליחת פקודת ההפעלה למטר לא יצאה לדרך.")
+                return
+            }
+            // ל-writeType NO_RESPONSE אין קולבק onCharacteristicWrite בטוח בכל המכשירים -
+            // מדווחים 'on' כבר כאן, אבל אם זו כתיבה עם תשובה (DEFAULT) נחכה לאישור בפועל
+            // ב-onCharacteristicWrite ונדווח שם אם היא נכשלה.
+            if (ch.writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
+                connected = true
+                runJs("window.__mpMeter && window.__mpMeter('on')")
             }
         }
 
+        @SuppressLint("MissingPermission")
+        override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (characteristic.uuid != CHAR_UUID) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                reportError("פקודת ההפעלה למטר נדחתה (קוד $status). ייתכן שהמטר צריך שיוך (pair) בהגדרות הבלוטות' של הטלפון, או שהוא לא תומך בפקודה הזו.")
+                return
+            }
+            connected = true
+            runJs("window.__mpMeter && window.__mpMeter('on')")
+        }
+
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (characteristic.uuid != CHAR_UUID) return
             val bytes = characteristic.value ?: return
             val hex = bytes.joinToString("") { "%02x".format(it) }
             runJs("window.__mpMeter && window.__mpMeter('data', " + jsString(hex) + ")")
