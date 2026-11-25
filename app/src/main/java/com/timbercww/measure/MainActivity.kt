@@ -11,6 +11,9 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.io.FileInputStream
 
@@ -41,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        enterImmersiveMode()
 
         webView = findViewById(R.id.webview)
         meter = MeterBridge(this, webView)
@@ -48,6 +52,23 @@ class MainActivity : AppCompatActivity() {
 
         setupWebView()
         loadApp()
+    }
+
+    /**
+     * מסך מלא אמיתי: בלי שורת הסטטוס למעלה ובלי שורת הניווט למטה (בדיוק כמו שהיה
+     * באפליקציה המקורית). אפשר תמיד לגלול קלות מהקצה כדי להציג אותן זמנית.
+     */
+    private fun enterImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterImmersiveMode()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
