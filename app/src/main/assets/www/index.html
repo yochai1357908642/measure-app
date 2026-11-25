@@ -631,6 +631,7 @@ body:has(.nr) #bar .ab-bt{display:none}
 <main id="app"><p class="muted">טוען…</p></main>
 <nav id="tabs" role="tablist" aria-label="ניווט ראשי"></nav>
 <div id="status" role="status" aria-live="polite"><span></span></div>
+  <div id="verbadge" aria-hidden="true" style="position:fixed;left:6px;bottom:4px;z-index:5;font:11px/1.2 var(--font,sans-serif);color:#9a9389;pointer-events:none;user-select:none;direction:ltr"></div>
 <dialog id="viewer" aria-label="תמונה מוגדלת">
   <img alt="">
   <div class="dlg-bar"><span id="viewer-cap"></span><button type="button" id="viewer-close">סגירה</button></div>
@@ -659,6 +660,7 @@ var arrived={},loaded=false,slow=false,dead=null,slowTimer=null;
 var writers=new Map(),deleted=new Set();
 var pendingRender=false,focusAfter=null,uid=0,busy=false,linkOpen=false,dragging=false;
 var $app=document.getElementById('app'),$bar=document.getElementById('bar'),$tabs=document.getElementById('tabs');
+  (function(){try{var vb=document.getElementById('verbadge');if(!vb)return;var set=function(v){vb.textContent='v'+v;};if(window.Android&&window.Android.getVersion){try{set(window.Android.getVersion());return;}catch(_){}}fetch('version.txt').then(function(r){return r.text();}).then(function(t){set(t.trim());})['catch'](function(){});}catch(_){}})();
 var ui={tab:'project',room:'',sub:'plan',pid:'main',pd:''};
 try{
   var _u=JSON.parse(localStorage.getItem('mp.ui')||'null');
