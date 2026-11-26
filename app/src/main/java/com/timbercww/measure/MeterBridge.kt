@@ -13,7 +13,11 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -42,10 +46,11 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
     // קודי סטטוס GATT ש"חולפים מעצמם" - לא בעיית שיוך/הרשאה אמיתית, אלא תקלת תזמון/
     // עומס פנימית בערימת הבלוטות' של הטלפון (כתיבה שקרתה "מהר מדי" אחרי החיבור).
     // הדוגמה הנפוצה ביותר: 128 (0x80, GATT_NO_RESOURCES) ו-133 (0x85, GATT_ERROR כללי)
-    // ו-142 (0x8e, GATT_CONNECTION_CONGESTED). במקרים האלה הפתרון הנכון הוא לנסות שוב
-    // אחרי המתנה קצרה, לא לבקש מהמשתמש לשייך את המכשיר.
+    // ו-142 (0x8e, GATT_CONNECTION_CONGESTED). חלק מהמכשירים (כמו המטר הזה, כנראה)
+    // מחזירים את הקוד הזה שוב ושוב גם אחרי כמה ניסיונות - במקרה כזה זו כנראה לא תקלת
+    // תזמון אלא דרישת שיוך (pairing/bonding) אמיתית שהמכשיר מסתיר מאחורי קוד שגיאה כללי.
     private val TRANSIENT_GATT_STATUSES = setOf(128, 133, 142)
-    private val MAX_RETRIES = 3
+    private val MAX_RETRIES = 2
     private val INITIAL_OP_DELAY_MS = 400L
 
     private val handler = Handler(Looper.getMainLooper())
@@ -56,6 +61,10 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
     private var scanning = false
     private var connected = false
     private var cccdRetries = 0
+    private var triedAutoBond = false
+
+    private var bondReceiverRegistered = false
+    private var pendingBondGatt: BluetoothGatt? = null
 
     private fun runJs(js: String) {
         handler.post { webView.evaluateJavascript(js, null) }
@@ -82,6 +91,7 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
         if (scanning) return
         scanning = true
         cccdRetries = 0
+        triedAutoBond = false
 
         val filters = listOf(
             ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
@@ -127,6 +137,60 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
     @SuppressLint("MissingPermission")
     private fun connectTo(device: BluetoothDevice) {
         gatt = device.connectGatt(context, false, gattCallback)
+    }
+
+    // מנקה את מטמון השירותים של אנדרואיד למכשיר הזה (reflection על API פנימי לא מתועד,
+    // אבל נפוץ ובדוק היטב בעולם ה-BLE של אנדרואיד). שימושי כשהמכשיר התחבר בעבר דרך
+    // דפדפן/אפליקציה אחרת ואנדרואיד "זוכר" שירותים שכבר לא תואמים.
+    private fun refreshDeviceCache(g: BluetoothGatt): Boolean {
+        return try {
+            val method = g.javaClass.getMethod("refresh")
+            (method.invoke(g) as? Boolean) ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun ensureBondReceiverRegistered() {
+        if (bondReceiverRegistered) return
+        bondReceiverRegistered = true
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(bondReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                context.registerReceiver(bondReceiver, filter)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private val bondReceiver = object : BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+            val g = pendingBondGatt ?: return
+            val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            if (device == null || device.address != g.device.address) return
+            val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+            when (bondState) {
+                BluetoothDevice.BOND_BONDED -> {
+                    pendingBondGatt = null
+                    // אחרי שיוך מוצלח כדאי "לרענן" את מטמון השירותים ולגלות שוב מההתחלה.
+                    refreshDeviceCache(g)
+                    handler.postDelayed({ g.discoverServices() }, 300L)
+                }
+                BluetoothDevice.BOND_NONE -> {
+                    pendingBondGatt = null
+                    reportError("השיוך (pairing) עם המטר נכשל או בוטל. ודא שהמטר דלוק וקרוב לטלפון ונסה שוב.")
+                    try { g.disconnect() } catch (_: Exception) {}
+                }
+                else -> {
+                    // BOND_BONDING - עדיין בתהליך, ממתינים לעדכון הבא.
+                }
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -180,16 +244,41 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun startAutoBondOrDiscover(g: BluetoothGatt) {
+        val device = g.device
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            refreshDeviceCache(g)
+            handler.postDelayed({ g.discoverServices() }, 200L)
+            return
+        }
+        // המכשיר עדיין לא משויך (paired) לטלפון. במקום לבקש מהמשתמש לפתוח הגדרות
+        // בלוטות' בעצמו, מתחילים שיוך ישירות מתוך האפליקציה - בלי שום פעולה ידנית
+        // חוץ מאישור חלון המערכת (אם יופיע בכלל).
+        ensureBondReceiverRegistered()
+        pendingBondGatt = g
+        val started = try { device.createBond() } catch (e: Exception) { false }
+        if (!started) {
+            pendingBondGatt = null
+            // לא הצלחנו להתחיל שיוך - בכל זאת מנסים לגלות שירותים ישירות.
+            refreshDeviceCache(g)
+            handler.postDelayed({ g.discoverServices() }, 200L)
+        }
+        // אחרת - מחכים לשידור ACTION_BOND_STATE_CHANGED ב-bondReceiver, שימשיך משם
+        // לגילוי השירותים ברגע שהשיוך יסתיים בהצלחה.
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                g.discoverServices()
+                startAutoBondOrDiscover(g)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 val wasConnected = connected
                 connected = false
                 g.close()
                 if (gatt === g) gatt = null
+                if (pendingBondGatt === g) pendingBondGatt = null
                 if (wasConnected) {
                     runJs("window.__mpMeter && window.__mpMeter('off')")
                 }
@@ -216,17 +305,28 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
             if (descriptor.uuid != CCCD_UUID) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 if (status in TRANSIENT_GATT_STATUSES && cccdRetries < MAX_RETRIES) {
-                    // תקלת תזמון/עומס זמנית - מנסים שוב אחרי המתנה גוברת, בלי לערב את המשתמש.
+                    // תקלת תזמון/עומס אפשרית - מנסים שוב אחרי המתנה גוברת, בלי לערב את המשתמש.
                     cccdRetries++
                     val delayMs = 400L * cccdRetries
                     handler.postDelayed({ enableNotifications(g) }, delayMs)
+                    return
+                }
+                if (status in TRANSIENT_GATT_STATUSES && !triedAutoBond &&
+                    g.device.bondState != BluetoothDevice.BOND_BONDED
+                ) {
+                    // כל הניסיונות החוזרים נכשלו באותו קוד, והמכשיר עדיין לא משויך -
+                    // כנראה שזו בעצם דרישת שיוך (pairing) אמיתית שהמכשיר מסתיר מאחורי
+                    // קוד שגיאה כללי. מתחילים שיוך אוטומטי במקום לוותר.
+                    triedAutoBond = true
+                    cccdRetries = 0
+                    startAutoBondOrDiscover(g)
                     return
                 }
                 // זה בדיוק המקרה ש"מתחבר אבל לא מגיע מידע": אם כתיבת ה-CCCD נכשלת בפועל,
                 // המטר אף פעם לא נכנס למצב שידור, וההתראה 'on' לא הייתה נשלחת בעבר למרות
                 // שדבר לא עבד בפועל.
                 val msg = if (status in TRANSIENT_GATT_STATUSES) {
-                    "הפעלת ההתראות מהמטר נכשלה שוב ושוב (קוד $status) - נראה שזו תקלת תקשורת זמנית. נסה לכבות ולהדליק את הבלוטות' בטלפון, לקרב את המטר, ולנסות שוב."
+                    "הפעלת ההתראות מהמטר נכשלה שוב ושוב (קוד $status), גם אחרי ניסיון שיוך. נסה לכבות ולהדליק את המטר עצמו, לקרב אותו לטלפון, ולנסות שוב."
                 } else {
                     "הפעלת ההתראות מהמטר נכשלה (קוד $status). ייתכן שצריך לשייך (pair) את המטר קודם בהגדרות הבלוטות' של הטלפון."
                 }
@@ -273,6 +373,7 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
             val wasConnected = connected
             connected = false
             gatt = null
+            pendingBondGatt = null
             if (wasConnected) {
                 runJs("window.__mpMeter && window.__mpMeter('off')")
             }
