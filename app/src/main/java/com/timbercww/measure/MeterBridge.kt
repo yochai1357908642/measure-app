@@ -130,6 +130,31 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
     }
 
     @SuppressLint("MissingPermission")
+    private fun sendStartCommand(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+        // המטר לא בהכרח תומך בכתיבה "בלי תשובה" (Write Without Response) - חייבים
+        // לבדוק את היכולות האמיתיות של ה-characteristic ולהתאים את סוג הכתיבה,
+        // בדיוק כמו שהדפדפן עושה (writeValueWithoutResponse עם נפילה ל-writeValue).
+        ch.writeType =
+            if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            else
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        ch.value = START_CMD
+        val queued = g.writeCharacteristic(ch)
+        if (!queued) {
+            reportError("שליחת פקודת ההפעלה למטר לא יצאה לדרך.")
+            return
+        }
+        // ל-writeType NO_RESPONSE אין קולבק onCharacteristicWrite בטוח בכל המכשירים -
+        // מדווחים 'on' כבר כאן, אבל אם זו כתיבה עם תשובה (DEFAULT) נחכה לאישור בפועל
+        // ב-onCharacteristicWrite ונדווח שם אם היא נכשלה.
+        if (ch.writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
+            connected = true
+            runJs("window.__mpMeter && window.__mpMeter('on')")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     private fun enableNotifications(g: BluetoothGatt) {
         val service = g.getService(SERVICE_UUID)
         val ch = service?.getCharacteristic(CHAR_UUID)
@@ -213,31 +238,6 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
             val service = g.getService(SERVICE_UUID)
             val ch = service?.getCharacteristic(CHAR_UUID) ?: return
             sendStartCommand(g, ch)
-        }
-
-        @SuppressLint("MissingPermission")
-        private fun sendStartCommand(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
-            // המטר לא בהכרח תומך בכתיבה "בלי תשובה" (Write Without Response) - חייבים
-            // לבדוק את היכולות האמיתיות של ה-characteristic ולהתאים את סוג הכתיבה,
-            // בדיוק כמו שהדפדפן עושה (writeValueWithoutResponse עם נפילה ל-writeValue).
-            ch.writeType =
-                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
-                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                else
-                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            ch.value = START_CMD
-            val queued = g.writeCharacteristic(ch)
-            if (!queued) {
-                reportError("שליחת פקודת ההפעלה למטר לא יצאה לדרך.")
-                return
-            }
-            // ל-writeType NO_RESPONSE אין קולבק onCharacteristicWrite בטוח בכל המכשירים -
-            // מדווחים 'on' כבר כאן, אבל אם זו כתיבה עם תשובה (DEFAULT) נחכה לאישור בפועל
-            // ב-onCharacteristicWrite ונדווח שם אם היא נכשלה.
-            if (ch.writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
-                connected = true
-                runJs("window.__mpMeter && window.__mpMeter('on')")
-            }
         }
 
         @SuppressLint("MissingPermission")
