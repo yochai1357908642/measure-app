@@ -39,6 +39,15 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
     )
     private val SCAN_TIMEOUT_MS = 12000L
 
+    // קודי סטטוס GATT ש"חולפים מעצמם" - לא בעיית שיוך/הרשאה אמיתית, אלא תקלת תזמון/
+    // עומס פנימית בערימת הבלוטות' של הטלפון (כתיבה שקרתה "מהר מדי" אחרי החיבור).
+    // הדוגמה הנפוצה ביותר: 128 (0x80, GATT_NO_RESOURCES) ו-133 (0x85, GATT_ERROR כללי)
+    // ו-142 (0x8e, GATT_CONNECTION_CONGESTED). במקרים האלה הפתרון הנכון הוא לנסות שוב
+    // אחרי המתנה קצרה, לא לבקש מהמשתמש לשייך את המכשיר.
+    private val TRANSIENT_GATT_STATUSES = setOf(128, 133, 142)
+    private val MAX_RETRIES = 3
+    private val INITIAL_OP_DELAY_MS = 400L
+
     private val handler = Handler(Looper.getMainLooper())
     private val btManager by lazy { context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager }
     private val adapter: BluetoothAdapter? get() = btManager.adapter
@@ -46,6 +55,7 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
     private var gatt: BluetoothGatt? = null
     private var scanning = false
     private var connected = false
+    private var cccdRetries = 0
 
     private fun runJs(js: String) {
         handler.post { webView.evaluateJavascript(js, null) }
@@ -71,6 +81,7 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
         }
         if (scanning) return
         scanning = true
+        cccdRetries = 0
 
         val filters = listOf(
             ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
@@ -118,6 +129,32 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
         gatt = device.connectGatt(context, false, gattCallback)
     }
 
+    @SuppressLint("MissingPermission")
+    private fun enableNotifications(g: BluetoothGatt) {
+        val service = g.getService(SERVICE_UUID)
+        val ch = service?.getCharacteristic(CHAR_UUID)
+        if (ch == null) {
+            reportError("המטר נמצא, אבל לא נמצא בו השירות הצפוי. ייתכן שהדגם משתמש בפרוטוקול אחר.")
+            g.disconnect()
+            return
+        }
+        val okLocal = g.setCharacteristicNotification(ch, true)
+        if (!okLocal) {
+            reportError("לא ניתן להפעיל קבלת מידע מהמטר (setCharacteristicNotification נכשל).")
+        }
+        val cccd = ch.getDescriptor(CCCD_UUID)
+        if (cccd != null) {
+            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            val queued = g.writeDescriptor(cccd)
+            if (!queued) {
+                reportError("כתיבת הגדרת ההתראות למטר לא יצאה לדרך.")
+            }
+        } else {
+            // אין CCCD - מנסים לשלוח את פקודת ההתחלה ישירות
+            sendStartCommand(g, ch)
+        }
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -141,42 +178,38 @@ class MeterBridge(private val context: Context, private val webView: WebView) {
                 g.disconnect()
                 return
             }
-            val service = g.getService(SERVICE_UUID)
-            val ch = service?.getCharacteristic(CHAR_UUID)
-            if (ch == null) {
-                reportError("המטר נמצא, אבל לא נמצא בו השירות הצפוי. ייתכן שהדגם משתמש בפרוטוקול אחר.")
-                g.disconnect()
-                return
-            }
-            val okLocal = g.setCharacteristicNotification(ch, true)
-            if (!okLocal) {
-                reportError("לא ניתן להפעיל קבלת מידע מהמטר (setCharacteristicNotification נכשל).")
-            }
-            val cccd = ch.getDescriptor(CCCD_UUID)
-            if (cccd != null) {
-                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                val queued = g.writeDescriptor(cccd)
-                if (!queued) {
-                    reportError("כתיבת הגדרת ההתראות למטר לא יצאה לדרך.")
-                }
-            } else {
-                // אין CCCD - מנסים לשלוח את פקודת ההתחלה ישירות
-                sendStartCommand(g, ch)
-            }
+            // המתנה קצרה לפני תחילת כתיבות ה-GATT: מיד אחרי שהחיבור/גילוי השירותים
+            // מסתיים, ערימת הבלוטות' בחלק מהטלפונים עדיין "תפוסה" ותחזיר שגיאת משאבים
+            // (סטטוס 128/133) על הכתיבה הראשונה, גם כשהכל תקין. השהיה קצרה פותרת את זה
+            // כמעט תמיד בלי שום פעולה מהמשתמש.
+            cccdRetries = 0
+            handler.postDelayed({ enableNotifications(g) }, INITIAL_OP_DELAY_MS)
         }
 
         @SuppressLint("MissingPermission")
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (descriptor.uuid != CCCD_UUID) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                // זה בדיוק המקרה ש"מתחבר אבל לא מגיע מידע": אם כתיבת ה-CCCD נכשלת (סטטוס
-                // שונה מ-GATT_SUCCESS - למשל חוסר הרשאה/אימות, או שהמטר פשוט לא תומך
-                // בהתראות על ה-characteristic הזה), המטר אף פעם לא נכנס למצב שידור, וההתראה
-                // 'on' לא הייתה נשלחת בעבר למרות שדבר לא עבד בפועל.
-                reportError("הפעלת ההתראות מהמטר נכשלה (קוד $status). ייתכן שצריך לשייך (pair) את המטר קודם בהגדרות הבלוטות' של הטלפון.")
+                if (status in TRANSIENT_GATT_STATUSES && cccdRetries < MAX_RETRIES) {
+                    // תקלת תזמון/עומס זמנית - מנסים שוב אחרי המתנה גוברת, בלי לערב את המשתמש.
+                    cccdRetries++
+                    val delayMs = 400L * cccdRetries
+                    handler.postDelayed({ enableNotifications(g) }, delayMs)
+                    return
+                }
+                // זה בדיוק המקרה ש"מתחבר אבל לא מגיע מידע": אם כתיבת ה-CCCD נכשלת בפועל,
+                // המטר אף פעם לא נכנס למצב שידור, וההתראה 'on' לא הייתה נשלחת בעבר למרות
+                // שדבר לא עבד בפועל.
+                val msg = if (status in TRANSIENT_GATT_STATUSES) {
+                    "הפעלת ההתראות מהמטר נכשלה שוב ושוב (קוד $status) - נראה שזו תקלת תקשורת זמנית. נסה לכבות ולהדליק את הבלוטות' בטלפון, לקרב את המטר, ולנסות שוב."
+                } else {
+                    "הפעלת ההתראות מהמטר נכשלה (קוד $status). ייתכן שצריך לשייך (pair) את המטר קודם בהגדרות הבלוטות' של הטלפון."
+                }
+                reportError(msg)
                 try { g.disconnect() } catch (_: Exception) {}
                 return
             }
+            cccdRetries = 0
             val service = g.getService(SERVICE_UUID)
             val ch = service?.getCharacteristic(CHAR_UUID) ?: return
             sendStartCommand(g, ch)
